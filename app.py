@@ -1,8 +1,10 @@
 from flask import Flask, render_template, request, jsonify, redirect, url_for, flash, session, send_file
-import sqlite3
 import json
 import re
 import uuid
+import psycopg
+from psycopg.rows import dict_row
+from os import getenv
 from datetime import datetime
 import bcrypt
 from init_db import criar_banco
@@ -14,7 +16,6 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from PIL import Image as ImageReader
 from reportlab.platypus import Image
 import logging
 
@@ -142,8 +143,8 @@ DESFECHO_MAP = {
 }
 
 def get_db_connection():
-    conn = sqlite3.connect('banco.db')
-    conn.row_factory = sqlite3.Row
+    password = getenv('PG_PASSWORD')
+    conn = psycopg.connect(f'postgresql://postgres:{password}@db:5432/postgres', row_factory=dict_row)
     return conn
 
 def draw_wrapped_text(canvas, text, x, y, max_width, font='Helvetica', font_size=9):
@@ -211,7 +212,7 @@ def admin_required(f):
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute('SELECT is_admin, role, is_super_admin FROM usuarios WHERE id = ?', (session['user_id'],))
+            cursor.execute('SELECT is_admin, role, is_super_admin FROM usuarios WHERE id = %s', (session['user_id'],))
             user = cursor.fetchone()
             conn.close()
             if not user or not user['is_admin']:
@@ -221,7 +222,7 @@ def admin_required(f):
             session['is_super_admin'] = user['is_super_admin']
             session['role'] = user['role']
             return f(*args, **kwargs)
-        except sqlite3.OperationalError as e:
+        except psycopg.OperationalError as e:
             flash(f'Erro no banco de dados: {str(e)}. Contate o administrador do banco de dados.', 'danger')
             return redirect(url_for('calculadora'))
     return decorated_function
@@ -243,7 +244,7 @@ def login():
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM usuarios WHERE email = ?', (email,))
+            cursor.execute('SELECT * FROM usuarios WHERE email = %s', (email,))
             usuario = cursor.fetchone()
             conn.close()
 
@@ -266,7 +267,7 @@ def login():
             else:
                 flash('E-mail ou senha incorretos.', 'error')
                 return redirect(url_for('login'))
-        except sqlite3.OperationalError as e:
+        except psycopg.OperationalError as e:
             flash(f'Erro no banco de dados: {str(e)}. Contate o administrador.', 'danger')
             return redirect(url_for('login'))
         except Exception as e:
@@ -316,16 +317,16 @@ def register():
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO usuarios (nome, cpf, profissao, telefone, email, municipio, cnes, senha, is_admin, approved, ativo, role)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ''', (nome, cpf, profissao, telefone, email, municipio, cnes, senha_hash, 0, 0, 0, 'municipal'))
             conn.commit()
             conn.close()
             flash('Cadastro realizado com sucesso! Aguarde aprovação.', 'success')
             return redirect(url_for('login'))
-        except sqlite3.IntegrityError:
+        except psycopg.IntegrityError:
             flash('E-mail ou CPF já cadastrado.', 'error')
             return redirect(url_for('register'))
-        except sqlite3.OperationalError as e:
+        except psycopg.OperationalError as e:
             flash(f'Erro no banco de dados: {str(e)}. Contate o administrador do banco de dados.', 'danger')
             return redirect(url_for('register'))
         except Exception as e:
@@ -349,12 +350,12 @@ def reset_password():
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM usuarios WHERE email = ?', (email,))
+            cursor.execute('SELECT * FROM usuarios WHERE email = %s', (email,))
             user = cursor.fetchone()
 
             if user and bcrypt.checkpw(old_password.encode('utf-8'), user['senha'].encode('utf-8')):
                 new_password_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-                cursor.execute('UPDATE usuarios SET senha = ? WHERE email = ?', (new_password_hash, email))
+                cursor.execute('UPDATE usuarios SET senha = %s WHERE email = %s', (new_password_hash, email))
                 conn.commit()
                 flash('Senha redefinida com sucesso! Faça login.', 'success')
             else:
@@ -362,7 +363,7 @@ def reset_password():
 
             conn.close()
             return redirect(url_for('login'))
-        except sqlite3.OperationalError as e:
+        except psycopg.OperationalError as e:
             flash(f'Erro no banco de dados: {str(e)}. Contate o administrador do banco de dados.', 'danger')
             return redirect(url_for('login'))
 
@@ -380,7 +381,7 @@ def calculadora():
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM calculos WHERE codigo_ficha = ? AND user_id = ?', (codigo_ficha, session['user_id']))
+            cursor.execute('SELECT * FROM calculos WHERE codigo_ficha = %s AND user_id = %s', (codigo_ficha, session['user_id']))
             ficha = cursor.fetchone()
             if ficha:
                 ficha = dict(ficha)
@@ -395,7 +396,7 @@ def calculadora():
                     else:
                         ficha[field] = []
             conn.close()
-        except sqlite3.OperationalError as e:
+        except psycopg.OperationalError as e:
             flash(f'Erro no banco de dados: {str(e)}. Contate o administrador do banco de dados.', 'danger')
             ficha = None
         except Exception as e:
@@ -450,7 +451,7 @@ def salvar_calculadora():
 
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT nome FROM usuarios WHERE id = ?', (session['user_id'],))
+        cursor.execute('SELECT nome FROM usuarios WHERE id = %s', (session['user_id'],))
         usuario = cursor.fetchone()
         if not usuario:
             conn.close()
@@ -518,7 +519,7 @@ def salvar_calculadora():
                 periodo_gestacional, data_envio, pontuacao_total, classificacao_risco, imc,
                 caracteristicas, avaliacao_nutricional, comorbidades, historia_obstetrica,
                 condicoes_gestacionais, profissional
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ''', (
             session['user_id'], codigo_ficha, nome_gestante, data_nasc, telefone, municipio, ubs, acs,
             periodo_gestacional, data_envio, pontuacao_total, classificacao_risco,
@@ -528,7 +529,7 @@ def salvar_calculadora():
         ))
 
         conn.commit()
-        cursor.execute('SELECT * FROM calculos WHERE codigo_ficha = ?', (codigo_ficha,))
+        cursor.execute('SELECT * FROM calculos WHERE codigo_ficha = %s', (codigo_ficha,))
         ficha_salva = cursor.fetchone()
         conn.close()
 
@@ -563,7 +564,7 @@ def salvar_calculadora():
             }
         })
 
-    except sqlite3.IntegrityError as e:
+    except psycopg.IntegrityError as e:
         conn.rollback()
         conn.close()
         logging.error(f"Erro de integridade: {str(e)}")
@@ -571,7 +572,7 @@ def salvar_calculadora():
             'success': False,
             'message': f'Erro de integridade no banco de dados: {str(e)}'
         }), 500
-    except sqlite3.OperationalError as e:
+    except psycopg.OperationalError as e:
         conn.rollback()
         conn.close()
         logging.error(f"Erro operacional no banco: {str(e)}")
@@ -628,7 +629,7 @@ def buscar_historico():
         query_count = '''
             SELECT COUNT(*) as total
             FROM calculos 
-            WHERE user_id = ? AND (desfecho IS NULL OR desfecho = '')
+            WHERE user_id = %s AND (desfecho IS NULL OR desfecho = '')
         '''
         cursor.execute(query_count, (session['user_id'],))
         total_records = cursor.fetchone()['total']
@@ -638,9 +639,9 @@ def buscar_historico():
             SELECT codigo_ficha, nome_gestante, data_envio, periodo_gestacional, 
                    pontuacao_total, classificacao_risco, municipio, ubs, acs, profissional
             FROM calculos 
-            WHERE user_id = ? AND (desfecho IS NULL OR desfecho = '')
+            WHERE user_id = %s AND (desfecho IS NULL OR desfecho = '')
             ORDER BY {sort_column} {sort_direction}
-            LIMIT ? OFFSET ?
+            LIMIT %s OFFSET %s
         '''
         cursor.execute(query, (session['user_id'], per_page, offset))
         fichas = cursor.fetchall()
@@ -655,7 +656,7 @@ def buscar_historico():
             'message': f'{len(fichas_list)} registro(s) encontrado(s).'
         })
 
-    except sqlite3.OperationalError as e:
+    except psycopg.OperationalError as e:
         logging.error(f"Erro no banco de dados: {str(e)}")
         return jsonify({'success': False, 'message': f'Erro no banco de dados: {str(e)}'}), 500
     except Exception as e:
@@ -680,7 +681,7 @@ def registrar_desfecho():
 
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT id FROM calculos WHERE codigo_ficha = ? AND user_id = ?', (codigo_ficha, session['user_id']))
+        cursor.execute('SELECT id FROM calculos WHERE codigo_ficha = %s AND user_id = %s', (codigo_ficha, session['user_id']))
         ficha = cursor.fetchone()
 
         if not ficha:
@@ -691,7 +692,7 @@ def registrar_desfecho():
             }), 404
 
         data_desfecho = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
-        cursor.execute('UPDATE calculos SET desfecho = ?, data_desfecho = ? WHERE codigo_ficha = ?', 
+        cursor.execute('UPDATE calculos SET desfecho = %s, data_desfecho = %s WHERE codigo_ficha = %s', 
                        (desfecho, data_desfecho, codigo_ficha))
         conn.commit()
         conn.close()
@@ -701,7 +702,7 @@ def registrar_desfecho():
             'message': 'Desfecho registrado com sucesso!'
         })
 
-    except sqlite3.OperationalError as e:
+    except psycopg.OperationalError as e:
         conn.rollback()
         conn.close()
         logging.error(f"Erro no banco de dados: {str(e)}")
@@ -734,7 +735,7 @@ def obter_ficha_completa():
         cursor = conn.cursor()
         cursor.execute('''
             SELECT * FROM calculos 
-            WHERE codigo_ficha = ? AND user_id = ?
+            WHERE codigo_ficha = %s AND user_id = %s
         ''', (codigo_ficha, session['user_id']))
         ficha = cursor.fetchone()
         conn.close()
@@ -790,7 +791,7 @@ def obter_ficha_completa():
 
         return jsonify({'ficha': ficha_dict, 'mapped_data': mapped_data}), 200
 
-    except sqlite3.OperationalError as e:
+    except psycopg.OperationalError as e:
         logging.error(f"Erro no banco de dados: {str(e)}")
         return jsonify({'error': f'Erro no banco de dados: {str(e)}'}), 500
     except Exception as e:
@@ -835,7 +836,7 @@ def admin_painel():
             LEFT JOIN usuarios u1 ON a.admin_id = u1.id
             LEFT JOIN usuarios u2 ON a.usuario_id = u2.id
             ORDER BY a.data_acao DESC
-            LIMIT ? OFFSET ?
+            LIMIT %s OFFSET %s
         ''', (per_page, offset))
         historico_acoes = [dict(acao) for acao in cursor.fetchall()]
 
@@ -858,7 +859,7 @@ def admin_painel():
                              usuarios_pendentes=usuarios_pendentes,
                              usuarios_cadastrados=usuarios_cadastrados,
                              historico_acoes=paginated_historico)
-    except sqlite3.OperationalError as e:
+    except psycopg.OperationalError as e:
         if conn:
             conn.close()
         flash(f'Erro no banco de dados: {str(e)}. Contate o administrador.', 'danger')
@@ -880,19 +881,19 @@ def admin_aprovar_usuario():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('UPDATE usuarios SET approved = 1, ativo = 1 WHERE id = ?', (usuario_id,))
+        cursor.execute('UPDATE usuarios SET approved = 1, ativo = 1 WHERE id = %s', (usuario_id,))
         if cursor.rowcount == 0:
             flash('Usuário não encontrado.', 'danger')
         else:
             cursor.execute('''
                 INSERT INTO acoes_administrativas (admin_id, usuario_id, acao, data_acao, detalhes)
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s)
             ''', (session['user_id'], usuario_id, 'Aprovação', datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
                   f'Usuário ID {usuario_id} aprovado'))
             conn.commit()
             flash('Usuário aprovado com sucesso.', 'success')
         conn.close()
-    except sqlite3.OperationalError as e:
+    except psycopg.OperationalError as e:
         flash(f'Erro no banco de dados: {str(e)}. Contate o administrador.', 'danger')
     return redirect(url_for('admin_painel'))
 
@@ -907,19 +908,19 @@ def admin_rejeitar_usuario():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('DELETE FROM usuarios WHERE id = ?', (usuario_id,))
+        cursor.execute('DELETE FROM usuarios WHERE id = %s', (usuario_id,))
         if cursor.rowcount == 0:
             flash('Usuário não encontrado.', 'danger')
         else:
             cursor.execute('''
                 INSERT INTO acoes_administrativas (admin_id, usuario_id, acao, data_acao, detalhes)
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s)
             ''', (session['user_id'], usuario_id, 'Rejeição', datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
                   f'Usuário ID {usuario_id} rejeitado e removido'))
             conn.commit()
             flash('Usuário rejeitado e removido.', 'success')
         conn.close()
-    except sqlite3.OperationalError as e:
+    except psycopg.OperationalError as e:
         flash(f'Erro no banco de dados: {str(e)}. Contate o administrador.', 'danger')
     return redirect(url_for('admin_painel'))
 
@@ -934,19 +935,19 @@ def admin_ativar_usuario():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('UPDATE usuarios SET ativo = 1 WHERE id = ?', (usuario_id,))
+        cursor.execute('UPDATE usuarios SET ativo = 1 WHERE id = %s', (usuario_id,))
         if cursor.rowcount == 0:
             flash('Usuário não encontrado.', 'danger')
         else:
             cursor.execute('''
                 INSERT INTO acoes_administrativas (admin_id, usuario_id, acao, data_acao, detalhes)
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s)
             ''', (session['user_id'], usuario_id, 'Ativação', datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
                   f'Usuário ID {usuario_id} ativado'))
             conn.commit()
             flash('Usuário ativado com sucesso.', 'success')
         conn.close()
-    except sqlite3.OperationalError as e:
+    except psycopg.OperationalError as e:
         flash(f'Erro no banco de dados: {str(e)}. Contate o administrador.', 'danger')
     return redirect(url_for('admin_painel'))
 
@@ -961,19 +962,19 @@ def admin_desativar_usuario():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('UPDATE usuarios SET ativo = 0 WHERE id = ?', (usuario_id,))
+        cursor.execute('UPDATE usuarios SET ativo = 0 WHERE id = %s', (usuario_id,))
         if cursor.rowcount == 0:
             flash('Usuário não encontrado.', 'danger')
         else:
             cursor.execute('''
                 INSERT INTO acoes_administrativas (admin_id, usuario_id, acao, data_acao, detalhes)
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s)
             ''', (session['user_id'], usuario_id, 'Desativação', datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 
                   f'Usuário ID {usuario_id} desativado'))
             conn.commit()
             flash('Usuário desativado com sucesso.', 'success')
         conn.close()
-    except sqlite3.OperationalError as e:
+    except psycopg.OperationalError as e:
         flash(f'Erro no banco de dados: {str(e)}. Contate o administrador.', 'danger')
     return redirect(url_for('admin_painel'))
 
@@ -986,14 +987,14 @@ def super_admin_required(f):
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute('SELECT is_admin, role, is_super_admin FROM usuarios WHERE id = ?', (session['user_id'],))
+            cursor.execute('SELECT is_admin, role, is_super_admin FROM usuarios WHERE id = %s', (session['user_id'],))
             user = cursor.fetchone()
             conn.close()
             if not user or user['role'] != 'estadual' or not user['is_super_admin']:
                 flash('Acesso negado: apenas administradores estaduais podem acessar esta página.', 'error')
                 return redirect(url_for('admin_painel'))
             return f(*args, **kwargs)
-        except sqlite3.OperationalError as e:
+        except psycopg.OperationalError as e:
             flash(f'Erro no banco de dados: {str(e)}. Contate o administrador do banco de dados.', 'danger')
             return redirect(url_for('admin_painel'))
     return decorated_function
@@ -1021,7 +1022,7 @@ def admin_gerenciar_usuarios():
             FROM usuarios
             WHERE ativo = 1 AND approved = 1
             ORDER BY nome ASC
-            LIMIT ? OFFSET ?
+            LIMIT %s OFFSET %s
         ''', (per_page, offset))
         usuarios = [dict(user) for user in cursor.fetchall()]
 
@@ -1059,8 +1060,8 @@ def admin_gerenciar_usuarios():
 
             cursor.execute('''
                 UPDATE usuarios
-                SET role = ?, is_admin = ?, is_super_admin = ?
-                WHERE id = ?
+                SET role = %s, is_admin = %s, is_super_admin = %s
+                WHERE id = %s
             ''', (novo_role, is_admin, is_super_admin, usuario_id))
 
             if cursor.rowcount == 0:
@@ -1069,7 +1070,7 @@ def admin_gerenciar_usuarios():
                 # Registrar a ação administrativa
                 cursor.execute('''
                     INSERT INTO acoes_administrativas (admin_id, usuario_id, acao, data_acao, detalhes)
-                    VALUES (?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s)
                 ''', (session['user_id'], usuario_id, 'Alteração de Papel',
                       datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                       f'Usuário ID {usuario_id} alterado para {novo_role}'))
@@ -1100,7 +1101,7 @@ def admin_gerenciar_usuarios():
                              current_page=page,
                              total_pages=total_pages)
 
-    except sqlite3.OperationalError as e:
+    except psycopg.OperationalError as e:
         if conn:
             conn.close()
         flash(f'Erro no banco de dados: {str(e)}. Contate o administrador.', 'danger')
@@ -1121,7 +1122,7 @@ def admin_senha():
         usuarios = [dict(user) for user in cursor.fetchall()]
         conn.close()
         return render_template('admin_senha.html', usuarios=usuarios)
-    except sqlite3.OperationalError as e:
+    except psycopg.OperationalError as e:
         flash(f'Erro no banco de dados: {str(e)}. Contate o administrador.', 'danger')
         return redirect(url_for('calculadora'))
 
@@ -1142,7 +1143,7 @@ def admin_reset_senha():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT id FROM usuarios WHERE email = ?', (email,))
+        cursor.execute('SELECT id FROM usuarios WHERE email = %s', (email,))
         user = cursor.fetchone()
 
         if not user:
@@ -1151,12 +1152,12 @@ def admin_reset_senha():
             return redirect(url_for('admin_senha'))
 
         nova_senha_hash = bcrypt.hashpw(nova_senha.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-        cursor.execute('UPDATE usuarios SET senha = ? WHERE email = ?', (nova_senha_hash, email))
+        cursor.execute('UPDATE usuarios SET senha = %s WHERE email = %s', (nova_senha_hash, email))
         conn.commit()
         conn.close()
         flash('Senha redefinida com sucesso.', 'success')
         return redirect(url_for('admin_senha'))
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         flash(f'Erro no banco de dados: {str(e)}. Contate o administrador.', 'error')
         return redirect(url_for('admin_senha'))
 
@@ -1168,7 +1169,7 @@ def admin_relatorio():
         cursor = conn.cursor()
 
         # Obter informações do usuário atual
-        cursor.execute('SELECT municipio, role, is_admin, is_super_admin FROM usuarios WHERE id = ?', (session['user_id'],))
+        cursor.execute('SELECT municipio, role, is_admin, is_super_admin FROM usuarios WHERE id = %s', (session['user_id'],))
         user = cursor.fetchone()
         if not user:
             conn.close()
@@ -1206,11 +1207,11 @@ def admin_relatorio():
             FROM calculos
         '''
         if is_admin == 1 and user_role == 'municipal':
-            query += ' WHERE municipio = ?'
+            query += ' WHERE municipio = %s'
             query_params.append(user_municipio)
             filtro_municipio = user_municipio
         elif is_super_admin == 1 and user_role == 'estadual' and filtro_municipio:
-            query += ' WHERE municipio = ?'
+            query += ' WHERE municipio = %s'
             query_params.append(filtro_municipio)
 
         query += ' ORDER BY data_envio DESC'
@@ -1340,7 +1341,7 @@ def admin_relatorio():
                              filtro_municipio=filtro_municipio, estatisticas=estatisticas, 
                              is_super_admin=is_super_admin, user_role=user_role)
 
-    except sqlite3.OperationalError as e:
+    except psycopg.OperationalError as e:
         if conn:
             conn.close()
         flash(f'Erro no banco de dados: {str(e)}.', 'error')
@@ -1362,7 +1363,7 @@ def gerar_pdf(code):
         logging.debug(f"Iniciando geração de PDF para ficha {code}")
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM calculos WHERE codigo_ficha = ? AND user_id = ?', 
+        cursor.execute('SELECT * FROM calculos WHERE codigo_ficha = %s AND user_id = %s', 
                        (code, session['user_id']))
         ficha = cursor.fetchone()
 
@@ -1620,7 +1621,7 @@ def gerar_pdf(code):
             mimetype='application/pdf'
         )
 
-    except sqlite3.OperationalError as e:
+    except psycopg.OperationalError as e:
         if conn:
             conn.close()
         logging.error(f"Erro no banco de dados ao gerar PDF para ficha {code}: {str(e)}")

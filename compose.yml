@@ -1,0 +1,31 @@
+name: estratificacao
+
+volumes:
+  pg_data:
+
+services:
+  app:
+    build: .
+    ports:
+      - 8000:8000
+    environment:
+      PG_PASSWORD: ${PG_PASSWORD}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    user: postgres
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready"]
+      interval: 10s
+      timeout: 20s
+      retries: 3
+      start_period: 10s
